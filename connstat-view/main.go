@@ -32,13 +32,15 @@ import (
 )
 
 type entry struct {
-	id    int64
-	dest  string
-	inTag string
-	out   string
-	up    int64
-	down  int64
-	first time.Time
+	id      int64
+	dest    string
+	inTag   string
+	out     string
+	process string
+	path    string
+	up      int64
+	down    int64
+	first   time.Time
 }
 
 type fetcher func() ([]entry, error)
@@ -87,7 +89,7 @@ func main() {
 				cur = &entry{id: e.id, first: time.Now()}
 				entries[e.id] = cur
 			}
-			*cur = entry{e.id, e.dest, e.inTag, e.out, e.up, e.down, cur.first}
+			*cur = entry{e.id, e.dest, e.inTag, e.out, e.process, e.path, e.up, e.down, cur.first}
 		}
 		live := make(map[int64]bool, len(list))
 		for _, e := range list {
@@ -112,12 +114,12 @@ func main() {
 		fmt.Print("\033[H\033[2J")
 		fmt.Printf("xray connstat - %s - %d live connection(s) (ctrl+c to quit)\n\n",
 			time.Now().Format("15:04:05"), len(ids))
-		fmt.Printf("%7s  %-32s  %-10s -> %-10s  %10s  %10s  %10s  %10s  %8s\n",
-			"ID", "DESTINATION", "INBOUND", "OUTBOUND", "DOWN/s", "UP/s", "TOTAL-D", "TOTAL-U", "AGE")
+		fmt.Printf("%7s  %-30s  %-14s  %-10s -> %-10s  %10s  %10s  %10s  %10s  %8s\n",
+			"ID", "DESTINATION", "PROCESS", "INBOUND", "OUTBOUND", "DOWN/s", "UP/s", "TOTAL-D", "TOTAL-U", "AGE")
 		for _, id := range ids {
 			e := entries[id]
-			fmt.Printf("%7d  %-32s  %-10s -> %-10s  %9s/s  %9s/s  %10s  %10s  %8s\n",
-				id, trunc(e.dest, 32), trunc(e.inTag, 10), trunc(e.out, 10),
+			fmt.Printf("%7d  %-30s  %-14s  %-10s -> %-10s  %9s/s  %9s/s  %10s  %10s  %8s\n",
+				id, trunc(e.dest, 30), trunc(e.process, 14), trunc(e.inTag, 10), trunc(e.out, 10),
 				human(e.down-prevDown[id]), human(e.up-prevUp[id]),
 				human(e.down), human(e.up), time.Since(e.first).Round(time.Second))
 			prevDown[id] = e.down
@@ -147,6 +149,8 @@ func httpFetcher(base string) fetcher {
 				Dest     string `json:"dest"`
 				Inbound  string `json:"inbound"`
 				Outbound string `json:"outbound"`
+				Process  string `json:"process"`
+				Path     string `json:"path"`
 				Uplink   int64  `json:"uplink"`
 				Downlink int64  `json:"downlink"`
 			} `json:"connstat"`
@@ -156,7 +160,7 @@ func httpFetcher(base string) fetcher {
 		}
 		out := make([]entry, 0, len(doc.Connstat))
 		for _, c := range doc.Connstat {
-			out = append(out, entry{id: c.ID, dest: c.Dest, inTag: c.Inbound, out: c.Outbound, up: c.Uplink, down: c.Downlink})
+			out = append(out, entry{id: c.ID, dest: c.Dest, inTag: c.Inbound, out: c.Outbound, process: c.Process, path: c.Path, up: c.Uplink, down: c.Downlink})
 		}
 		return out, nil
 	}

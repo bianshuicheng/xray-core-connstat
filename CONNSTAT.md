@@ -6,6 +6,7 @@
 ## 功能特性
 
 - per-connection 统计，计数器名含嗅探域名：`conn>>><id>|<域名>|<入站tag>|<出站tag>>>uplink/downlink`
+- **进程识别**：连接建立时按入站源 `ip:port` 异步反查系统 socket 表（Windows iphlpapi），登记 **process / pid / path** 字段；独立 goroutine 不阻塞转发，连接关闭自动清理。实测：`process=curl pid=56196 path=...`
 - TUN 模式开/关都有效（计数挂在内核 dispatcher / dialer 层，TUN 流量同样经过）
 - Vision/XTLS 直拷路径不漏计（复用官方预留的 `stat.CounterConnection` 包装，`UnwrapRawConn` 可剥出计数器）
 - 计数器命名不匹配 metrics `stats()` 的四段式解析，**不会污染 v2rayN 自身的总速度显示，也不会双重计数**
@@ -15,12 +16,12 @@
 
 | 文件 | 改动 |
 |---|---|
-| `common/connstat/connstat.go` | **新增**。per-connection 计数器的 context 传递 + 连接 ID 分配 |
-| `app/dispatcher/connstat.go` | **新增**。在路由决策后注册一对计数器，名字含嗅探域名 |
-| `app/dispatcher/default.go` | `routedDispatch` 挂钩：注册计数器 + `context.AfterFunc` 在连接关闭时注销（复用 trackOnlineIP 的清理模式） |
+| `common/connstat/connstat.go` | **新增**。per-connection 计数器的 context 传递 + 连接 ID 分配 + 进程信息（process/pid/path）登记 |
+| `app/dispatcher/connstat.go` | **新增**。在路由决策后注册一对计数器，名字含嗅探域名 + 异步进程反查（入站源 `ip:port` → 系统进程） |
+| `app/dispatcher/default.go` | `routedDispatch` 挂钩：注册计数器、触发进程识别 + `context.AfterFunc` 在连接关闭时注销（复用 trackOnlineIP 的清理模式） |
 | `transport/internet/dialer.go` | `internet.Dial` 出口把拨号连接包一层 `stat.CounterConnection`（Read=下行 / Write=上行计数） |
-| `app/metrics/metrics.go` | `/debug/vars` 新增 `connstat` 键，输出全部活跃连接的结构化 JSON |
-| `connstat-view/` | **新增**。终端查看器（HTTP 轮询 metrics / gRPC 双模式） |
+| `app/metrics/metrics.go` | `/debug/vars` 新增 `connstat` 键，输出全部活跃连接的结构化 JSON（含 process/pid/path 字段） |
+| `connstat-view/` | **新增**。终端查看器（HTTP 轮询 metrics / gRPC 双模式，含进程列） |
 
 其余文件与官方 v26.9.9 完全一致。
 
@@ -52,6 +53,7 @@ connstat-view.exe -api 127.0.0.1:62756      （传统 gRPC StatsService 模式�
 ## 注意事项
 
 - 计数是"线上字节"（含 VLESS/Reality 协议头开销），比客户端侧流量略大几个百分点，属正常。
+- **进程识别的边界**：极短命连接可能来不及完成反查（进程字段留空）；局域网来源、内核自身进程、部分 UWP 应用可能查不到进程；进程图标属于界面侧能力（见 v2rayN-connstat）。
 - Linux 上补丁会使 Vision splice 直拷降级为 readV（仍为内核级 readv，影响很小）；Windows 本来就走 readV，无影响。
 - 独立 UDP 协议（hysteria2/tuic 等）走 ListenPacket 的部分暂不计数；vless/vmess/trojan 的 UDP 复用在 TCP 连接里，正常计数。
 - 配合 v2rayN 使用时，v2rayN 自动升级内核会覆盖补丁版 `bin\xray\xray.exe`，升级后重新复制补丁版即可。

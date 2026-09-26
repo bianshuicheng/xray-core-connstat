@@ -14,6 +14,7 @@ import (
 
 	"github.com/xtls/xray-core/app/observatory"
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/connstat"
 	"github.com/xtls/xray-core/common/errors"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/signal/done"
@@ -183,6 +184,9 @@ type ConnStatInfo struct {
 	Dest     string `json:"dest"`
 	Inbound  string `json:"inbound"`
 	Outbound string `json:"outbound"`
+	Process  string `json:"process,omitempty"`
+	PID      int    `json:"pid,omitempty"`
+	Path     string `json:"path,omitempty"`
 	Uplink   int64  `json:"uplink"`
 	Downlink int64  `json:"downlink"`
 }
@@ -212,6 +216,9 @@ func (p *MetricsHandler) connStats() []*ConnStatInfo {
 		if !found {
 			info = &ConnStatInfo{ID: id, Dest: parts[1], Inbound: parts[2], Outbound: parts[3]}
 			m[id] = info
+		}
+		if pi, ok := connstat.ProcessOf(id); ok {
+			info.Process, info.PID, info.Path = pi.Name, pi.PID, pi.Path
 		}
 		switch dir {
 		case "uplink":

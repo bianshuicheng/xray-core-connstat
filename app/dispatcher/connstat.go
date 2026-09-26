@@ -1,10 +1,12 @@
 package dispatcher
 
 import (
+	"context"
 	"strconv"
 
 	"github.com/xtls/xray-core/common/connstat"
 	"github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/features/stats"
 )
 
@@ -19,6 +21,34 @@ type connStat struct {
 func (c *connStat) unregister(sm stats.Manager) {
 	sm.UnregisterCounter(c.upName)
 	sm.UnregisterCounter(c.downName)
+	connstat.RemoveProcess(c.ID)
+}
+
+// lookupConnProcess asynchronously records the local process that opened the
+// connection (best effort: matches the OS socket table by the inbound source
+// ip:port; short-lived connections or LAN sources may not resolve).
+func lookupConnProcess(ctx context.Context, id int64, dest net.Destination) {
+	inbound := session.InboundFromContext(ctx)
+	if inbound == nil || !inbound.Source.IsValid() || inbound.Source.Address == nil {
+		return
+	}
+	network := "tcp"
+	if inbound.Source.Network == net.Network_UDP {
+		network = "udp"
+	}
+	srcIP := inbound.Source.Address.IP().String()
+	srcPort := uint16(inbound.Source.Port)
+	var dstIP string
+	var dstPort uint16
+	if dest.Address != nil && dest.Address.Family().IsIP() {
+		dstIP = dest.Address.IP().String()
+		dstPort = uint16(dest.Port)
+	}
+	go func() {
+		if pid, name, path, err := net.FindProcess(network, srcIP, srcPort, dstIP, dstPort); err == nil {
+			connstat.SetProcess(id, connstat.ProcessInfo{PID: pid, Name: name, Path: path})
+		}
+	}()
 }
 
 // registerConnStat creates the counter pair of a new connection, exposed as

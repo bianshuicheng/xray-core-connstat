@@ -507,6 +507,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	if cs := d.registerConnStat(destination, inTag, ob.Tag); cs != nil {
 		ctx = connstat.ContextWithCounters(ctx, cs.Counters)
 		context.AfterFunc(ctx, func() { cs.unregister(d.stats) })
+		lookupConnProcess(ctx, cs.ID, destination)
 	}
 
 	handler.Dispatch(ctx, link)

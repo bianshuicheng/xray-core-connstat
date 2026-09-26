@@ -13,6 +13,7 @@
 | 能力 | 说明 |
 |---|---|
 | **按连接统计** | 每条连接独立计数，计数器名带嗅探出的目标域名：`conn>>><id>|<域名>|<入站tag>|<出站tag>>>uplink/downlink` |
+| **进程识别** | 连接建立时按入站源 `ip:port` 异步反查系统 socket 表，得到发起连接的**进程名、PID、可执行文件路径**（独立 goroutine 不阻塞转发，连接关闭自动清理） |
 | **实时速度 + 累计流量** | 上行/下行分开统计，既算瞬时速率也算累计字节 |
 | **TUN 模式可用** | 计数挂在内核 dispatcher / dialer 层，TUN 开或关都能统计到 |
 | **直拷路径不漏计** | 复用官方预留的 `stat.CounterConnection` 包装，Vision/XTLS 直拷（raw copy）路径同样计入 |
@@ -54,12 +55,12 @@ connstat-view.exe [-url http://127.0.0.1:10812] [-interval 1s] [-hide-inbound ap
 
 | 文件 | 改动 |
 |---|---|
-| `common/connstat/connstat.go` | **新增**。per-connection 计数器的 context 传递 + 连接 ID 分配 |
-| `app/dispatcher/connstat.go` | **新增**。路由决策后注册一对计数器（名字含嗅探域名） |
-| `app/dispatcher/default.go` | `routedDispatch` 挂钩：注册计数器 + `context.AfterFunc` 在连接关闭时注销 |
+| `common/connstat/connstat.go` | **新增**。per-connection 计数器的 context 传递 + 连接 ID 分配 + 进程信息（process/pid/path）登记 |
+| `app/dispatcher/connstat.go` | **新增**。路由决策后注册一对计数器（名字含嗅探域名）+ 异步进程反查（入站源 `ip:port` → 系统进程） |
+| `app/dispatcher/default.go` | `routedDispatch` 挂钩：注册计数器、触发进程识别 + `context.AfterFunc` 在连接关闭时注销 |
 | `transport/internet/dialer.go` | `internet.Dial` 出口给拨号连接包一层 `stat.CounterConnection`（Read=下行 / Write=上行） |
-| `app/metrics/metrics.go` | `/debug/vars` 新增 `connstat` 键，输出全部活跃连接的结构化 JSON |
-| `connstat-view/` | **新增**。终端查看器（HTTP metrics / gRPC 双模式） |
+| `app/metrics/metrics.go` | `/debug/vars` 新增 `connstat` 键，输出全部活跃连接的结构化 JSON（含 process/pid/path 字段） |
+| `connstat-view/` | **新增**。终端查看器（HTTP metrics / gRPC 双模式，含进程列） |
 | `README.md` / `CONNSTAT.md` | **新增/替换**。本补丁的说明文档（原版说明在 `README-upstream.md`） |
 
 **除上述文件外，与官方 v26.9.9 源码完全一致。**
@@ -78,6 +79,7 @@ go build -o connstat-view.exe ./connstat-view
 ## ⚠️ 注意事项
 
 - 计数是"线上字节"（含 VLESS/Reality 协议头开销），比客户端侧流量略大几个百分点，属正常。
+- **进程识别的边界**：极短命连接可能来不及完成反查（进程列留空）；局域网来源、内核自身进程、部分 UWP 应用可能查不到进程。
 - Linux 上补丁会使 Vision splice 直拷降级为 readV（仍为内核级 readv，影响很小）；Windows 本来就走 readV，无影响。
 - 独立 UDP 协议（hysteria2/tuic 等）走 ListenPacket 的部分暂不计数；vless/vmess/trojan 的 UDP 复用在 TCP 连接里，正常计数。
 - 配合 v2rayN 时，v2rayN 自动升级内核会覆盖补丁版 `bin\xray\xray.exe`，升级后重新复制补丁版即可。

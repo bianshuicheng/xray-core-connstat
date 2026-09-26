@@ -15,6 +15,7 @@ package connstat
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 
 	"github.com/xtls/xray-core/features/stats"
@@ -47,4 +48,38 @@ var connID int64
 // NextID returns a process-wide unique connection id.
 func NextID() int64 {
 	return atomic.AddInt64(&connID, 1)
+}
+
+// ProcessInfo describes the local process that opened a connection.
+type ProcessInfo struct {
+	PID  int
+	Name string
+	Path string
+}
+
+var (
+	processMu    sync.RWMutex
+	processTable = map[int64]ProcessInfo{}
+)
+
+// SetProcess records the owning process of a connection.
+func SetProcess(id int64, info ProcessInfo) {
+	processMu.Lock()
+	defer processMu.Unlock()
+	processTable[id] = info
+}
+
+// ProcessOf returns the owning process of a connection, if known.
+func ProcessOf(id int64) (ProcessInfo, bool) {
+	processMu.RLock()
+	defer processMu.RUnlock()
+	info, ok := processTable[id]
+	return info, ok
+}
+
+// RemoveProcess drops the process record of a closed connection.
+func RemoveProcess(id int64) {
+	processMu.Lock()
+	defer processMu.Unlock()
+	delete(processTable, id)
 }
