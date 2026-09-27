@@ -24,9 +24,13 @@ func (c *connStat) unregister(sm stats.Manager) {
 	connstat.RemoveProcess(c.ID)
 }
 
-// lookupConnProcess asynchronously records the local process that opened the
-// connection (best effort: matches the OS socket table by the inbound source
-// ip:port; short-lived connections or LAN sources may not resolve).
+// lookupConnProcess records the local process that opened the connection
+// (best effort: matches the OS socket table by the inbound source ip:port).
+// It runs synchronously on the per-connection dispatch goroutine so that the
+// socket is guaranteed to still be alive - short-lived connections closed
+// before an async lookup would never be found.
+// Connections created by the kernel itself (the DNS module) have no client
+// socket and are left without a process name.
 func lookupConnProcess(ctx context.Context, id int64, dest net.Destination) {
 	inbound := session.InboundFromContext(ctx)
 	if inbound == nil || !inbound.Source.IsValid() || inbound.Source.Address == nil {
@@ -44,11 +48,9 @@ func lookupConnProcess(ctx context.Context, id int64, dest net.Destination) {
 		dstIP = dest.Address.IP().String()
 		dstPort = uint16(dest.Port)
 	}
-	go func() {
-		if pid, name, path, err := net.FindProcess(network, srcIP, srcPort, dstIP, dstPort); err == nil {
-			connstat.SetProcess(id, connstat.ProcessInfo{PID: pid, Name: name, Path: path})
-		}
-	}()
+	if pid, name, path, err := net.FindProcess(network, srcIP, srcPort, dstIP, dstPort); err == nil {
+		connstat.SetProcess(id, connstat.ProcessInfo{PID: pid, Name: name, Path: path})
+	}
 }
 
 // registerConnStat creates the counter pair of a new connection, exposed as
