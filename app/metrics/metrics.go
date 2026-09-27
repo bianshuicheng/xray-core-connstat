@@ -187,6 +187,7 @@ type ConnStatInfo struct {
 	Process  string `json:"process,omitempty"`
 	PID      int    `json:"pid,omitempty"`
 	Path     string `json:"path,omitempty"`
+	Src      string `json:"src,omitempty"`
 	Uplink   int64  `json:"uplink"`
 	Downlink int64  `json:"downlink"`
 }
@@ -218,7 +219,7 @@ func (p *MetricsHandler) connStats() []*ConnStatInfo {
 			m[id] = info
 		}
 		if pi, ok := connstat.ProcessOf(id); ok {
-			info.Process, info.PID, info.Path = pi.Name, pi.PID, pi.Path
+			info.Process, info.PID, info.Path, info.Src = pi.Name, pi.PID, pi.Path, pi.Src
 		}
 		switch dir {
 		case "uplink":

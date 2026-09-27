@@ -2,7 +2,9 @@ package dispatcher
 
 import (
 	"context"
+	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/xtls/xray-core/common/connstat"
 	"github.com/xtls/xray-core/common/net"
@@ -27,10 +29,11 @@ func (c *connStat) unregister(sm stats.Manager) {
 // lookupConnProcess records the local process that opened the connection
 // (best effort: matches the OS socket table by the inbound source ip:port).
 // It runs synchronously on the per-connection dispatch goroutine so that the
-// socket is guaranteed to still be alive - short-lived connections closed
-// before an async lookup would never be found.
-// Connections created by the kernel itself (the DNS module) have no client
-// socket and are left without a process name.
+// socket is guaranteed to still be alive. For flows whose socket cannot be
+// found immediately (UDP sockets that closed right after sendto, races), a
+// few background retries are scheduled before giving up.
+// The lookup inputs are always recorded (ProcessInfo.Src) so failures are
+// diagnosable through the metrics endpoint.
 func lookupConnProcess(ctx context.Context, id int64, dest net.Destination) {
 	inbound := session.InboundFromContext(ctx)
 	if inbound == nil || !inbound.Source.IsValid() || inbound.Source.Address == nil {
@@ -48,9 +51,26 @@ func lookupConnProcess(ctx context.Context, id int64, dest net.Destination) {
 		dstIP = dest.Address.IP().String()
 		dstPort = uint16(dest.Port)
 	}
+	src := fmt.Sprintf("%s %s:%d -> %s:%d", network, srcIP, srcPort, dstIP, dstPort)
+	var lastErr error
 	if pid, name, path, err := net.FindProcess(network, srcIP, srcPort, dstIP, dstPort); err == nil {
-		connstat.SetProcess(id, connstat.ProcessInfo{PID: pid, Name: name, Path: path})
+		connstat.SetProcess(id, connstat.ProcessInfo{PID: pid, Name: name, Path: path, Src: src})
+		return
+	} else {
+		lastErr = err
 	}
+	go func() {
+		for _, delay := range []time.Duration{300 * time.Millisecond, time.Second, 3 * time.Second} {
+			time.Sleep(delay)
+			if pid, name, path, err := net.FindProcess(network, srcIP, srcPort, dstIP, dstPort); err == nil {
+				connstat.SetProcess(id, connstat.ProcessInfo{PID: pid, Name: name, Path: path, Src: src})
+				return
+			} else {
+				lastErr = err
+			}
+		}
+		connstat.SetProcess(id, connstat.ProcessInfo{Name: "LOOKUP-FAILED: " + lastErr.Error(), Path: src})
+	}()
 }
 
 // registerConnStat creates the counter pair of a new connection, exposed as

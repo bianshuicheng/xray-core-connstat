@@ -55,6 +55,7 @@ type ProcessInfo struct {
 	PID  int
 	Name string
 	Path string
+	Src  string // lookup inputs: "network srcIP:srcPort -> dstIP:dstPort"
 }
 
 var (
