@@ -78,12 +78,19 @@ func open(name, desc string) (*wintun.Adapter, error) {
 	// generate a deterministic GUID from the adapter name
 	id := md5.Sum([]byte(name))
 	guid := (*windows.GUID)(unsafe.Pointer(&id[0]))
-	// try to create adapter anew
-	adapter, err := wintun.CreateAdapter(name, desc, guid)
-	if err == nil {
+	// Prefer reusing the persistent adapter: WintunCreateAdapter goes through
+	// device installation, which takes a private-namespace-guarded mutex whose
+	// DACL may deny access when the core runs as SYSTEM from a service. Opening
+	// the existing adapter needs no device installation at all.
+	if adapter, err := wintun.OpenAdapter(name); err == nil {
 		return adapter, nil
 	}
-	return nil, err
+	// try to create adapter anew
+	adapter, err := wintun.CreateAdapter(name, desc, guid)
+	if err != nil {
+		return nil, err
+	}
+	return adapter, nil
 }
 
 func (t *WindowsTun) Start() (err error) {

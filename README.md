@@ -78,6 +78,10 @@ go build -o connstat-view.exe ./connstat-view
 
 ## 📝 更新记录
 
+- **2026-09-27（内核 v3）**
+  - **TUN 全新启动后进程名集体消失的根因修复**：上游 `IsLocal()` 把本机接口地址列表缓存 60 秒，TUN 网卡的 IP 往往还没进缓存，首个连接起一分钟内所有 TUN 源地址被误判为"非本机"直接拒绝查询。补丁移除了这个前置门——反查的源地址本来就是本机入站收到的，真正非本机的源在系统 socket 表里同样匹配不到行，结果不变但不再被过期缓存误杀。
+  - **查询失败不再静默**：首查未命中时以 300ms / 1s / 3s 在后台重试三次（UDP 立发即关的套接字等边缘情况），最终失败登记 `LOOKUP-FAILED: <原因>`；metrics `connstat` 条目新增 `src` 字段（`network srcIP:srcPort -> dstIP:dstPort`），失败原因可直接从接口排查。
+  - **wintun 适配器优先复用**：`open()` 先尝试 `OpenAdapter`，失败才 `CreateAdapter`。后者要走设备安装流程，其中的私有命名空间互斥锁在内核以 SYSTEM 服务身份运行时会被 DACL 拒绝。
 - **2026-09-27（内核 v2 修订）**：**进程识别改为同步查询**——原实现在独立 goroutine 里异步反查 socket 表，极短命连接在查询完成前就已关闭，导致进程列留空；现在在连接建立的 dispatch goroutine 上直接查询，保证查询时 socket 仍然存活，短命连接也能正确显示进程。内核自身发起的连接（DNS 模块）没有客户端 socket，明确保持无进程名。
 - **2026-09-26（内核 v2）**：新增进程识别（按入站源 `ip:port` 反查系统 socket 表，登记 process/pid/path）。
 - **2026-09-26（内核 v1）**：connstat 连接监控补丁（per-connection 域名/实时速度/累计流量）。
@@ -85,7 +89,7 @@ go build -o connstat-view.exe ./connstat-view
 ## ⚠️ 注意事项
 
 - 计数是"线上字节"（含 VLESS/Reality 协议头开销），比客户端侧流量略大几个百分点，属正常。
-- **进程识别的边界**：进程查询为同步执行（连接建立时 socket 必然存活，短命连接也能查到）；内核自身发起的连接（DNS 模块）没有客户端 socket，无进程名；局域网来源、部分 UWP 应用可能查不到。
+- **进程识别的边界**：进程查询为同步执行 + 后台重试三次（连接建立时 socket 必然存活，短命连接也能查到；查不到的在 300ms/1s/3s 后重试，最终失败显示 `LOOKUP-FAILED`）；内核自身发起的连接（DNS 模块）没有客户端 socket，无进程名；局域网来源、部分 UWP 应用可能查不到。
 - Linux 上补丁会使 Vision splice 直拷降级为 readV（仍为内核级 readv，影响很小）；Windows 本来就走 readV，无影响。
 - 独立 UDP 协议（hysteria2/tuic 等）走 ListenPacket 的部分暂不计数；vless/vmess/trojan 的 UDP 复用在 TCP 连接里，正常计数。
 - 配合 v2rayN 时，v2rayN 自动升级内核会覆盖补丁版 `bin\xray\xray.exe`，升级后重新复制补丁版即可。
