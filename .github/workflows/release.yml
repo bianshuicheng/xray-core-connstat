@@ -291,7 +291,7 @@ jobs:
           file: ./Xray-${{ env.ASSET_NAME }}.zip*
           tag: ${{ inputs.release_tag || github.ref }}
           file_glob: true
-          overwrite_files: true
+          overwrite: true
 
       - name: Upload files to Artifacts
         uses: actions/upload-artifact@v7
