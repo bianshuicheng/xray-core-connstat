@@ -10,7 +10,8 @@
 //	                              inbound in the xray config)
 //
 // Example: connstat-view.exe                     (defaults: v2rayN on 10812)
-//          connstat-view.exe -url http://127.0.0.1:10812 -interval 1s
+//
+//	connstat-view.exe -url http://127.0.0.1:10812 -interval 1s
 package main
 
 import (
