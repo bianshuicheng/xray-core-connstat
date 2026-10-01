@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/connstat"
 	"github.com/xtls/xray-core/common/dice"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/net"
@@ -47,15 +46,11 @@ func RegisterTransportDialer(protocol string, dialer dialFunc) error {
 
 // Dial dials a internet connection towards the given destination.
 func Dial(ctx context.Context, dest net.Destination, streamSettings *MemoryStreamConfig) (stat.Connection, error) {
-	var (
-		conn stat.Connection
-		err  error
-	)
 	if dest.Network == net.Network_TCP {
 		if streamSettings == nil {
-			s, serr := ToMemoryStreamConfig(nil)
-			if serr != nil {
-				return nil, errors.New("failed to create default stream settings").Base(serr)
+			s, err := ToMemoryStreamConfig(nil)
+			if err != nil {
+				return nil, errors.New("failed to create default stream settings").Base(err)
 			}
 			streamSettings = s
 		}
@@ -65,31 +60,18 @@ func Dial(ctx context.Context, dest net.Destination, streamSettings *MemoryStrea
 		if dialer == nil {
 			return nil, errors.New(protocol, " dialer not registered")
 		}
-		conn, err = dialer(ctx, dest, streamSettings)
-	} else if dest.Network == net.Network_UDP {
+		return dialer(ctx, dest, streamSettings)
+	}
+
+	if dest.Network == net.Network_UDP {
 		udpDialer := transportDialerCache["udp"]
 		if udpDialer == nil {
 			return nil, errors.New("UDP dialer not registered")
 		}
-		conn, err = udpDialer(ctx, dest, streamSettings)
-	} else {
-		return nil, errors.New("unknown network ", dest.Network)
+		return udpDialer(ctx, dest, streamSettings)
 	}
-	if err != nil {
-		return nil, err
-	}
-	// Per-connection traffic stats: count every byte on the wire. The
-	// CounterConnection wrapper survives UnwrapRawConn, so raw-copy fast
-	// paths (readV/splice in proxy.CopyRawConnIfExist) keep counting through
-	// the extracted counters.
-	if cs := connstat.FromContext(ctx); cs != nil {
-		conn = &stat.CounterConnection{
-			Connection:   conn,
-			ReadCounter:  cs.Down,
-			WriteCounter: cs.Up,
-		}
-	}
-	return conn, nil
+
+	return nil, errors.New("unknown network ", dest.Network)
 }
 
 // DestIpAddress returns the ip of proxy server. It is useful in case of Android client, which prepare an IP before proxy connection is established
@@ -281,7 +263,7 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
 			dest.Address = net.IPAddress(ips[dice.Roll(len(ips))])
 			errors.LogInfo(ctx, "replace destination with "+dest.String())
 		} else {
-			return TcpRaceDial(ctx, src, ips, dest.Port, sockopt, dest.Address.String())
+			return guardSelfOutbound(TcpRaceDial(ctx, src, ips, dest.Port, sockopt, dest.Address.String()))
 		}
 	}
 
@@ -296,7 +278,28 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
 		return redirect(ctx, dest, sockopt.DialerProxy, h), nil
 	}
 
-	return effectiveSystemDialer.Dial(ctx, src, dest, sockopt)
+	return guardSelfOutbound(effectiveSystemDialer.Dial(ctx, src, dest, sockopt))
+}
+
+// guardSelfOutbound refuses a socket that left through the TUN this process is serving,
+// and records the ones that did not, so a dial that loops back can be recognised on arrival.
+func guardSelfOutbound(conn net.Conn, err error) (net.Conn, error) {
+	if err != nil || conn == nil {
+		return conn, err
+	}
+	local := net.DestinationFromAddr(conn.LocalAddr())
+	if local.Address == nil || local.Port == 0 {
+		return conn, nil
+	}
+	network := "tcp"
+	if local.Network == net.Network_UDP {
+		network = "udp"
+	}
+	if e := net.NoteSelfOutbound(network, local.Address, uint16(local.Port)); e != nil {
+		_ = conn.Close()
+		return nil, errors.New("refusing to dial ", local.Network.String(), " to ", conn.RemoteAddr(), " through our own TUN").Base(e)
+	}
+	return conn, nil
 }
 
 func InitSystemDialer(dc dns.Client, om outbound.Manager) {

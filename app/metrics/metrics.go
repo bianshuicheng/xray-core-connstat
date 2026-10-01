@@ -8,14 +8,12 @@ import (
 	stdnet "net"
 	"net/http"
 	"net/http/pprof"
-	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/xtls/xray-core/app/observatory"
 	"github.com/xtls/xray-core/common"
-	"github.com/xtls/xray-core/common/connstat"
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/flowwatch"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/signal/done"
 	"github.com/xtls/xray-core/core"
@@ -54,6 +52,9 @@ func (p *MetricsHandler) Type() interface{} {
 
 func (p *MetricsHandler) Start() error {
 	handler := p.httpHandler()
+
+	// The flow table is only worth maintaining while something can read it back.
+	flowwatch.Enable()
 
 	// direct listen a port if listen is set
 	if p.listen != "" {
@@ -157,7 +158,6 @@ func (p *MetricsHandler) handleDebugVars(w http.ResponseWriter, r *http.Request)
 		vars[kv.Key] = value
 	})
 	vars["stats"] = marshalJSON(p.stats())
-	vars["connstat"] = marshalJSON(p.connStats())
 	vars["observatory"] = marshalJSON(p.observatoryStatus())
 
 	payload, err := json.Marshal(vars)
@@ -174,67 +174,6 @@ func marshalJSON(value interface{}) json.RawMessage {
 		return json.RawMessage("null")
 	}
 	return data
-}
-
-// ConnStatInfo is the per-connection traffic entry published under the
-// "connstat" key of /debug/vars by the connstat patch
-// (see common/connstat and app/dispatcher/connstat.go).
-type ConnStatInfo struct {
-	ID       int64  `json:"id"`
-	Dest     string `json:"dest"`
-	Inbound  string `json:"inbound"`
-	Outbound string `json:"outbound"`
-	Process  string `json:"process,omitempty"`
-	PID      int    `json:"pid,omitempty"`
-	Path     string `json:"path,omitempty"`
-	Src      string `json:"src,omitempty"`
-	Uplink   int64  `json:"uplink"`
-	Downlink int64  `json:"downlink"`
-}
-
-// connStats collects the live per-connection counters registered by the
-// dispatcher: conn>>><id>|<dest>|<inboundTag>|<outboundTag>>>uplink/downlink.
-func (p *MetricsHandler) connStats() []*ConnStatInfo {
-	m := map[int64]*ConnStatInfo{}
-	p.statsManager.VisitCounters(func(name string, counter feature_stats.Counter) bool {
-		rest, ok := strings.CutPrefix(name, "conn>>>")
-		if !ok {
-			return true
-		}
-		meta, dir, ok := strings.Cut(rest, ">>>")
-		if !ok {
-			return true
-		}
-		parts := strings.Split(meta, "|")
-		if len(parts) != 4 {
-			return true
-		}
-		id, err := strconv.ParseInt(parts[0], 10, 64)
-		if err != nil {
-			return true
-		}
-		info, found := m[id]
-		if !found {
-			info = &ConnStatInfo{ID: id, Dest: parts[1], Inbound: parts[2], Outbound: parts[3]}
-			m[id] = info
-		}
-		if pi, ok := connstat.ProcessOf(id); ok {
-			info.Process, info.PID, info.Path, info.Src = pi.Name, pi.PID, pi.Path, pi.Src
-		}
-		switch dir {
-		case "uplink":
-			info.Uplink = counter.Value()
-		case "downlink":
-			info.Downlink = counter.Value()
-		}
-		return true
-	})
-	out := make([]*ConnStatInfo, 0, len(m))
-	for _, info := range m {
-		out = append(out, info)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
-	return out
 }
 
 func (p *MetricsHandler) stats() map[string]map[string]map[string]int64 {

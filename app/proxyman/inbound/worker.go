@@ -10,6 +10,7 @@ import (
 	"github.com/xtls/xray-core/common/buf"
 	c "github.com/xtls/xray-core/common/ctx"
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/flowwatch"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/common/session"
@@ -108,13 +109,19 @@ func (w *tcpWorker) callback(conn stat.Connection) {
 			WriteCounter: w.downlinkCounter,
 		}
 	}
+	source := net.DestinationFromAddr(conn.RemoteAddr())
+	local := net.DestinationFromAddr(conn.LocalAddr())
 	ctx = session.ContextWithInbound(ctx, &session.Inbound{
-		Source:  net.DestinationFromAddr(conn.RemoteAddr()),
-		Local:   net.DestinationFromAddr(conn.LocalAddr()),
+		Source:  source,
+		Local:   local,
 		Gateway: net.TCPDestination(w.address, w.port),
 		Tag:     w.tag,
 		Conn:    conn,
 	})
+
+	flow := flowwatch.New(net.Network_TCP, source, local, w.tag)
+	ctx = flowwatch.WithFlow(ctx, flow)
+	conn = flowwatch.Wrap(conn, flow)
 
 	content := new(session.Content)
 	content.SniffingRequest = w.sniffingRequest
@@ -124,6 +131,7 @@ func (w *tcpWorker) callback(conn stat.Connection) {
 		errors.LogInfoInner(ctx, err, "connection ends")
 	}
 	cancel()
+	flowwatch.Release(flow)
 	conn.Close()
 }
 
@@ -179,6 +187,7 @@ type udpConn struct {
 	done             *done.Instance
 	uplink           stats.Counter
 	downlink         stats.Counter
+	flow             *flowwatch.Flow
 	inactive         bool
 	cancel           context.CancelFunc
 }
@@ -226,6 +235,7 @@ func (c *udpConn) Close() error {
 	if c.cancel != nil {
 		c.cancel()
 	}
+	flowwatch.Release(c.flow)
 	common.Must(c.done.Close())
 	common.Must(common.Close(c.writer))
 	return nil
@@ -287,6 +297,7 @@ func (w *udpWorker) getConnection(id connID) (*udpConn, bool) {
 	}
 
 	pReader, pWriter := pipe.New(pipe.DiscardOverflow(), pipe.WithSizeLimit(16*1024))
+	flow := flowwatch.New(net.Network_UDP, id.src, net.UDPDestination(w.address, w.port), w.tag)
 	conn := &udpConn{
 		reader: pReader,
 		writer: pWriter,
@@ -302,8 +313,9 @@ func (w *udpWorker) getConnection(id connID) (*udpConn, bool) {
 			Port: int(w.port),
 		},
 		done:     done.New(),
-		uplink:   w.uplinkCounter,
-		downlink: w.downlinkCounter,
+		uplink:   flowwatch.UplinkCounter(w.uplinkCounter, flow),
+		downlink: flowwatch.DownlinkCounter(w.downlinkCounter, flow),
+		flow:     flow,
 	}
 	w.activeConn[id] = conn
 
@@ -358,6 +370,7 @@ func (w *udpWorker) callback(b *buf.Buffer, source net.Destination, originalDest
 			content := new(session.Content)
 			content.SniffingRequest = w.sniffingRequest
 			ctx = session.ContextWithContent(ctx, content)
+			ctx = flowwatch.WithFlow(ctx, conn.flow)
 			if err := w.proxy.Process(ctx, net.Network_UDP, conn, w.dispatcher); err != nil {
 				errors.LogInfoInner(ctx, err, "connection ends")
 			}

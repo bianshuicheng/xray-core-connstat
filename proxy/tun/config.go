@@ -31,15 +31,28 @@ func (updater *InterfaceUpdater) Update() {
 
 	got, err := findOutboundInterface(updater.tunIndex, updater.fixedName)
 	if err != nil {
-		errors.LogInfoInner(context.Background(), err, "[tun] failed to update interface")
+		errors.LogWarning(context.Background(), "[tun] failed to update interface, outbounds will be refused: ", err)
 		updater.iface = nil
 		return
 	}
 
 	if got == nil {
-		errors.LogInfo(context.Background(), "[tun] failed to update interface > got == nil")
+		errors.LogWarning(context.Background(), "[tun] failed to update interface > got == nil")
 		updater.iface = nil
 		return
+	}
+
+	// Sending our own dials out of the TUN feeds them straight back into the stack that
+	// dialled them, which then treats them as a new client connection and dials again.
+	if got.Index == updater.tunIndex {
+		errors.LogWarning(context.Background(), "[tun] outbound interface would be the TUN itself, refusing: ", got.Name, " ", got.Index)
+		updater.iface = nil
+		return
+	}
+	if updater.tunIndex <= 0 {
+		// Without a usable TUN index the check above cannot say anything; keep dialling
+		// and let the per connection fuse catch a loop instead.
+		errors.LogWarning(context.Background(), "[tun] cannot tell which interface is the TUN, index ", updater.tunIndex)
 	}
 
 	if updater.iface != nil && updater.iface.Index == got.Index && updater.iface.Name == got.Name {

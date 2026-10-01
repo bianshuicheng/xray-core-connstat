@@ -10,6 +10,7 @@ import (
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/flowwatch"
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
@@ -185,6 +186,19 @@ func (s *Server) processTCP(ctx context.Context, conn stat.Connection, dispatche
 }
 
 func (s *Server) handleUDPPayload(ctx context.Context, conn stat.Connection, dispatcher routing.Dispatcher) error {
+	// The association's control TCP connection already tells which application this
+	// is; the real UDP endpoint is filled in once the first datagram arrives.
+	control := session.InboundFromContext(ctx)
+	var source, local net.Destination
+	inboundTag := ""
+	if control != nil {
+		source, local, inboundTag = control.Source, control.Local, control.Tag
+	}
+	flow := flowwatch.New(net.Network_UDP, source, local, inboundTag)
+	ctx = flowwatch.WithFlow(ctx, flow)
+	defer flowwatch.Release(flow)
+	conn = flowwatch.Wrap(conn, flow)
+
 	udpServer := udp.NewDispatcher(dispatcher, func(ctx context.Context, packet *udp_proto.Packet) {
 		payload := packet.Payload
 		errors.LogDebug(ctx, "writing back UDP response with ", payload.Len(), " bytes")
@@ -235,6 +249,7 @@ func (s *Server) handleUDPPayload(ctx context.Context, conn stat.Connection, dis
 				newInbound.Local = net.DestinationFromAddr(conn.LocalAddr())
 				inbound = &newInbound
 				ctx = session.ContextWithInbound(ctx, inbound)
+				flowwatch.Rebind(ctx, inbound.Source, inbound.Local)
 				errors.LogInfo(ctx, "client UDP connection from ", inbound.Source)
 			}
 		})

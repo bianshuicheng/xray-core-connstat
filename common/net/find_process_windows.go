@@ -57,13 +57,13 @@ func FindProcess(network, srcIP string, srcPort uint16, destIP string, destPort 
 	if initErr != nil {
 		return 0, "", "", initErr
 	}
-	// NOTE(connstat patch): the upstream IsLocal gate was removed.
-	// IsLocal caches the interface address list for a minute, and the address
-	// of a freshly created TUN adapter may be missing from that cache right
-	// after the core (re)starts, so every lookup failed with ErrNotLocal for
-	// up to a minute. Our callers only look up sources received on local
-	// inbounds; genuinely remote sources simply find no matching row in the
-	// transport table below, which yields the same "not found" outcome.
+	isLocal, err := IsLocal(net.ParseIP(srcIP))
+	if err != nil {
+		return 0, "", "", errors.New("failed to determine if address is local: ", err)
+	}
+	if !isLocal {
+		return 0, "", "", ErrNotLocal
+	}
 	if network != "tcp" && network != "udp" {
 		panic("Unsupported network type for process lookup.")
 	}

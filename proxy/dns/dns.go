@@ -71,6 +71,10 @@ type ownLinkVerifier interface {
 	IsOwnLink(ctx context.Context) bool
 }
 
+// dnsSessionIdleCap bounds how long a DNS session may sit idle. A DNS interaction is
+// sub-second; anything still open minutes later is an outage artifact, not traffic.
+const dnsSessionIdleCap = 30 * time.Second
+
 type Handler struct {
 	client          dns.Client
 	fdns            dns.FakeDNSEngine
@@ -175,11 +179,19 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
 
 	errors.LogInfo(ctx, "handling DNS traffic to ", dest)
 
+	if session.TimeoutOnlyFromContext(ctx) {
+		ctx = context.Background()
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	conn := &outboundConn{
 		dialer: func() (stat.Connection, error) {
 			return d.Dial(ctx, dest)
 		},
 		connReady: make(chan struct{}, 1),
+		ctx:       ctx,
 	}
 
 	var reader dns_proto.MessageReader
@@ -214,17 +226,18 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
 		}
 	}
 
-	if session.TimeoutOnlyFromContext(ctx) {
-		ctx = context.Background()
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
 	terminate := func() {
 		cancel()
 		conn.Close()
 	}
-	timer := signal.CancelAfterInactivity(ctx, terminate, h.timeout)
-	defer timer.SetTimeout(0)
+	// DNS sessions are sub-second by nature; the policy idle timeout (minutes) kept every
+	// session of an outage's query storm alive for its whole length - the SERVFAIL answer
+	// marks the conn as "written", so the TUN reaper will never collect it either.
+	idle := h.timeout
+	if idle > dnsSessionIdleCap {
+		idle = dnsSessionIdleCap
+	}
+	timer := signal.CancelAfterInactivity(ctx, terminate, idle)
 
 	request := func() error {
 		defer timer.SetTimeout(0)
@@ -303,7 +316,24 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
 		}
 	}
 
-	if err := task.Run(ctx, request, response); err != nil {
+	// Whichever side ends first tears the session down. task.Run returns on the first error
+	// but leaves the other task running: a request side that died with the client (the TUN
+	// reaper closed the conn mid-outage) used to orphan the response task on connReady
+	// until the idle timer fired - one leaked goroutine and outboundConn per DNS query for
+	// as long as the storm kept clients re-querying. terminate() unblocks both.
+	// WithoutCancel: terminate() cancels the session ctx to unblock whichever task is
+	// still parked, and that cancellation must not race into task.Run's own select, where
+	// it would turn clean closes into "context canceled" errors.
+	err := task.Run(context.WithoutCancel(ctx), func() error {
+		err := request()
+		terminate()
+		return err
+	}, func() error {
+		err := response()
+		terminate()
+		return err
+	})
+	if err != nil {
 		return errors.New("connection ends").Base(err)
 	}
 
@@ -311,6 +341,17 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
 }
 
 func (h *Handler) handleIPQuery(id uint16, qType dnsmessage.Type, domain string, writer dns_proto.MessageWriter, timer *signal.ActivityTimer) {
+	// With no working egress the lookup can only fail after its own dial and query
+	// timeouts, and the failing query is what keeps clients re-asking. Answer SERVFAIL
+	// immediately: the retry loop stays cheap instead of paying a goroutine, a socket and
+	// several seconds of doomed upstream work per query. Cached and stale answers would
+	// have been served by LookupIP without dialling; this path only runs when a real
+	// lookup is required, i.e. the answer is going to be a failure anyway.
+	if net.UplinkDown() {
+		_ = h.rejectNonIPQuery(id, qType, domain, writer, dnsmessage.RCodeServerFailure)
+		return
+	}
+
 	var ips []net.IP
 	var ttl uint32
 	var err error
@@ -437,6 +478,10 @@ type outboundConn struct {
 	access sync.Mutex
 	dialer func() (stat.Connection, error)
 
+	// ctx ends with the session. Read waits on it alongside connReady: a query whose dial
+	// never completes (the uplink is down) would otherwise park the reader here forever,
+	// because only Close closes connReady and nothing else guarantees Close.
+	ctx       context.Context
 	conn      net.Conn
 	connReady chan struct{}
 	closed    bool
@@ -481,8 +526,12 @@ func (c *outboundConn) Read(b []byte) (int, error) {
 
 	if c.conn == nil {
 		c.access.Unlock()
-		_, open := <-c.connReady
-		if !open {
+		select {
+		case _, open := <-c.connReady:
+			if !open {
+				return 0, io.EOF
+			}
+		case <-c.ctx.Done():
 			return 0, io.EOF
 		}
 		return c.conn.Read(b)
@@ -493,11 +542,14 @@ func (c *outboundConn) Read(b []byte) (int, error) {
 
 func (c *outboundConn) Close() error {
 	c.access.Lock()
+	defer c.access.Unlock()
+	if c.closed {
+		return nil
+	}
 	c.closed = true
 	close(c.connReady)
 	if c.conn != nil {
 		c.conn.Close()
 	}
-	c.access.Unlock()
 	return nil
 }

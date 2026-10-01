@@ -78,19 +78,17 @@ func open(name, desc string) (*wintun.Adapter, error) {
 	// generate a deterministic GUID from the adapter name
 	id := md5.Sum([]byte(name))
 	guid := (*windows.GUID)(unsafe.Pointer(&id[0]))
-	// Prefer reusing the persistent adapter: WintunCreateAdapter goes through
-	// device installation, which takes a private-namespace-guarded mutex whose
-	// DACL may deny access when the core runs as SYSTEM from a service. Opening
-	// the existing adapter needs no device installation at all.
-	if adapter, err := wintun.OpenAdapter(name); err == nil {
+	// try to open existing adapter by name
+	adapter, err := wintun.OpenAdapter(name)
+	if err == nil {
 		return adapter, nil
 	}
 	// try to create adapter anew
-	adapter, err := wintun.CreateAdapter(name, desc, guid)
-	if err != nil {
-		return nil, err
+	adapter, err = wintun.CreateAdapter(name, desc, guid)
+	if err == nil {
+		return adapter, nil
 	}
-	return adapter, nil
+	return nil, err
 }
 
 func (t *WindowsTun) Start() (err error) {
@@ -395,6 +393,11 @@ func findOutboundInterface(tunIndex int, fixedName string) (*net.Interface, erro
 	}
 	if indexWifi != 0 {
 		index = indexWifi
+	}
+	if index == 0 {
+		// Reporting index 0 as an interface would let the caller bind to nothing and let
+		// the routing table hand our dials to the TUN.
+		return nil, errors.New("no up interface has a default route")
 	}
 	return net.InterfaceByIndex(int(index))
 }

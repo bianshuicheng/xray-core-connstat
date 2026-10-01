@@ -56,9 +56,11 @@ type Handler struct {
 	encryption    *encryption.ClientInstance
 	reverse       *Reverse
 
-	testpre  uint32
-	initpre  sync.Once
-	preConns chan *ConnExpire
+	testpre     uint32
+	initpre     sync.Once
+	preConns    chan *ConnExpire
+	preClosed   chan struct{}
+	preCloseOne sync.Once
 }
 
 type ConnExpire struct {
@@ -81,6 +83,7 @@ func New(ctx context.Context, config *Config) (*Handler, error) {
 		server:        server,
 		policyManager: v.GetFeature(policy.ManagerType()).(policy.Manager),
 		cone:          ctx.Value("cone").(bool),
+		preClosed:     make(chan struct{}),
 	}
 
 	a := handler.server.User.Account.(*vless.MemoryAccount)
@@ -136,6 +139,7 @@ func New(ctx context.Context, config *Config) (*Handler, error) {
 // Close implements common.Closable.Close().
 func (h *Handler) Close() error {
 	if h.preConns != nil {
+		h.preCloseOne.Do(func() { close(h.preClosed) })
 		close(h.preConns)
 	}
 	if h.reverse != nil {
@@ -163,28 +167,57 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 				go func() {
 					defer func() { recover() }()
 					ctx := xctx.ContextWithID(context.Background(), session.NewID())
+					var lastWarn time.Time
 					for {
 						conn, err := dialer.Dial(ctx, rec.Destination)
 						if err != nil {
-							errors.LogWarningInner(ctx, err, "pre-connect failed")
+							// Without a backoff the failed dial spins the core and floods the log
+							// for as long as the network stays down. Re-warn at most every 5s and
+							// wait out the interval on a channel that also fires on handler close.
+							if time.Since(lastWarn) > 5*time.Second {
+								lastWarn = time.Now()
+								errors.LogWarningInner(ctx, err, "pre-connect failed, retrying in 500ms")
+							}
+							select {
+							case <-h.preClosed:
+								return
+							case <-time.After(500 * time.Millisecond):
+							}
 							continue
 						}
-						h.preConns <- &ConnExpire{Conn: conn, Expire: time.Now().Add(time.Minute * 2)} // TODO: customize & randomize
-						time.Sleep(time.Millisecond * 200)                                             // TODO: customize & randomize
+						select {
+						case h.preConns <- &ConnExpire{Conn: conn, Expire: time.Now().Add(time.Minute * 2)}: // TODO: customize & randomize
+						case <-h.preClosed:
+							conn.Close()
+							return
+						}
+						time.Sleep(time.Millisecond * 200) // TODO: customize & randomize
 					}
 				}()
 			}
 		})
+	loop:
 		for {
-			connTime := <-h.preConns
-			if connTime == nil {
-				return errors.New("closed handler")
+			select {
+			case connTime, ok := <-h.preConns:
+				if !ok || connTime == nil {
+					return errors.New("closed handler")
+				}
+				if time.Now().Before(connTime.Expire) {
+					conn = connTime.Conn
+					break loop
+				}
+				connTime.Conn.Close()
+			case <-ctx.Done():
+				return errors.New("cancelled while waiting for pre-connection").Base(ctx.Err())
+			case <-time.After(10 * time.Second):
+				// While the network is down no pre-connection ever arrives and reconnect
+				// storms would pile up here: the inbound pump has not started yet, so
+				// nothing cancels this context until the client itself gives up. Falling
+				// through to the ordinary dial path hands the request a real dial error
+				// instead of parking this goroutine for the whole outage.
+				break loop
 			}
-			if time.Now().Before(connTime.Expire) {
-				conn = connTime.Conn
-				break
-			}
-			connTime.Conn.Close()
 		}
 	}
 

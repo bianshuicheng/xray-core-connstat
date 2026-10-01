@@ -3,12 +3,14 @@ package main
 import (
 	"flag"
 	"os"
+	"runtime/debug"
 
 	"github.com/xtls/xray-core/main/commands/base"
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
 func main() {
+	limitHeap()
 	os.Args = getArgsV4Compatible()
 
 	base.RootCommand.Long = "Xray is a platform for building proxies."
@@ -20,6 +22,16 @@ func main() {
 		base.RootCommand.Commands...,
 	)
 	base.Execute()
+}
+
+// Without a ceiling Go keeps the high-water mark of a connection storm for the rest of the
+// process: the objects are gone but the pages stay committed on Windows. 256 MB is well above
+// what this core needs at rest and far below what it used to hold after a burst.
+func limitHeap() {
+	if os.Getenv("GOMEMLIMIT") != "" {
+		return
+	}
+	debug.SetMemoryLimit(256 << 20)
 }
 
 func getArgsV4Compatible() []string {

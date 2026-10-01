@@ -8,8 +8,8 @@ import (
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
-	"github.com/xtls/xray-core/common/connstat"
 	"github.com/xtls/xray-core/common/errors"
+	"github.com/xtls/xray-core/common/flowwatch"
 	"github.com/xtls/xray-core/common/log"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
@@ -377,7 +377,11 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 }
 
 func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, network net.Network) (SniffResult, error) {
-	payload := buf.NewWithSize(32767)
+	// 8 KiB keeps this in the pool's 8 KiB bucket. Asking for 32 KiB pins a 32 KiB buffer per
+	// connection, and during a reconnect storm that is the difference between tens and
+	// hundreds of megabytes held. A hello larger than this still returns
+	// ErrProtoNeedMoreData, and that one connection falls back to IP based routing.
+	payload := buf.NewWithSize(8191)
 	defer payload.Release()
 
 	sniffer := NewSniffer(ctx)
@@ -487,6 +491,7 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	}
 
 	ob.Tag = handler.Tag()
+	flowwatch.UpdateRoute(ctx, destination, handler.Tag())
 	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
 		if tag := handler.Tag(); tag != "" {
 			if inTag == "" {
@@ -500,14 +505,6 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 			}
 		}
 		log.Record(accessMessage)
-	}
-
-	// per-connection traffic stats: counters are removed when ctx is
-	// cancelled, i.e. when the connection closes (same pattern as trackOnlineIP).
-	if cs := d.registerConnStat(destination, inTag, ob.Tag); cs != nil {
-		ctx = connstat.ContextWithCounters(ctx, cs.Counters)
-		context.AfterFunc(ctx, func() { cs.unregister(d.stats) })
-		lookupConnProcess(ctx, cs.ID, destination)
 	}
 
 	handler.Dispatch(ctx, link)
