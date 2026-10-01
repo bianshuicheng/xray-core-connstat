@@ -52,6 +52,7 @@ require (
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/transport/v4 v4.1.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
+	github.com/sagernet/sing v0.5.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect

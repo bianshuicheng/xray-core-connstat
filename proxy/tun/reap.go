@@ -56,10 +56,10 @@ func tripBreaker() {
 
 type watchedConn struct {
 	net.Conn
-	started   time.Time
-	udp       bool
-	everRead  atomic.Bool
-	everWrote atomic.Bool
+	started    time.Time
+	udp        bool
+	everRead   atomic.Bool
+	everWrote  atomic.Bool
 	lastActive atomic.Int64 // unix nanos of the last read or write that moved data
 }
 
