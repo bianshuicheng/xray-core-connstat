@@ -68,6 +68,13 @@ func (t *stackGVisor) Start() error {
 
 	tcpForwarder := tcp.NewForwarder(ipStack, 0, 65535, func(r *tcp.ForwarderRequest) {
 		go func(r *tcp.ForwarderRequest) {
+			// 断网熔断：在创建 gVisor 端点之前直接 RST。一次重连尝试的成本只剩 SYN
+			// 处理本身——没有端点、没有协程体、没有缓冲，断网期高频重试不再累积内存。
+			if breakerAdmissionClosed(time.Now()) {
+				r.Complete(true)
+				return
+			}
+
 			var wq waiter.Queue
 			id := r.ID()
 

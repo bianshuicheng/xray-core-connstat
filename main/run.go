@@ -103,11 +103,11 @@ func executeRun(cmd *base.Command, args []string) {
 
 	// Return heap to the OS on a schedule. A reconnect storm pushes the heap's high-water
 	// mark up and Go only trickles it back; from the outside the process then looks like it
-	// never shrinks after an outage. Scavenging every couple of minutes keeps the resident
-	// set near what the traffic actually needs, the way mihomo's tight GC pacing reads.
+	// never shrinks after an outage. Scavenging every minute keeps the resident set near
+	// what the traffic actually needs, the way mihomo's tight GC pacing reads.
 	go func() {
 		for {
-			time.Sleep(2 * time.Minute)
+			time.Sleep(time.Minute)
 			debug.FreeOSMemory()
 		}
 	}()
