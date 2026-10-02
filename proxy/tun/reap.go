@@ -38,20 +38,33 @@ const (
 	maxLiveTun = 1024
 
 	// The reaper is also the outage detector: a tick that reaps this many connections means
-	// clients are asking into a dead uplink faster than they can be served. For
-	// breakerHold, admission drops to breakerAdmitPerSec per second - reconnect storms stop
-	// parking hundreds of sessions, while the trickle keeps probing for recovery. The
-	// breaker expires on its own; a healthy uplink simply never re-trips it.
+	// clients are asking into a dead uplink faster than they can be served. While the
+	// breaker holds, admission is fully closed - mihomo-style, every connection dies at the
+	// door and the pipeline stays idle, which is what keeps memory flat during an outage.
+	// Recovery is event driven: the moment the outbound interface reappears (the
+	// InterfaceUpdater stamps the change) admission resumes; a hard expiry re-probes at a
+	// trickle in case the outage ended without an interface event.
 	breakerTripThreshold = 15
 	breakerHold          = 30 * time.Second
-	breakerAdmitPerSec   = 2
 )
 
 // tripBreaker closes the admission gate for breakerHold. Called the moment the dialer
 // controller finds there is no working egress - one refused dial is enough to know the
 // storm is starting, long before the reaper can count fifteen corpses.
 func tripBreaker() {
-	breakerUntil.Store(time.Now().Add(breakerHold).Unix())
+	now := time.Now().Unix()
+	breakerUntil.Store(now + int64(breakerHold.Seconds()))
+	breakerTrippedAt.Store(now)
+}
+
+// breakerAdmissionClosed reports whether the gate must stay shut: tripped and the
+// outbound interface has not reappeared since. The InterfaceUpdater re-stamps its change
+// timestamp the moment the uplink comes back, which opens the gate ahead of the expiry.
+func breakerAdmissionClosed(now time.Time) bool {
+	if now.Unix() >= breakerUntil.Load() {
+		return false
+	}
+	return ifaceChangedAt.Load() <= breakerTrippedAt.Load()
 }
 
 type watchedConn struct {
@@ -71,10 +84,10 @@ var (
 	reapWarn   atomic.Int64
 	reapOnce   sync.Once
 
-	breakerUntil   atomic.Int64 // unix seconds; admission is rate-limited until then
-	breakerRefused atomic.Int64
-	admitSecond    atomic.Int64
-	admitCount     atomic.Int64
+	breakerUntil     atomic.Int64 // unix seconds; admission is closed until then
+	breakerTrippedAt atomic.Int64 // unix seconds; when the current trip started
+	ifaceChangedAt   atomic.Int64 // unix seconds; last outbound-interface state change (set by InterfaceUpdater)
+	breakerRefused   atomic.Int64
 )
 
 func (w *watchedConn) Read(b []byte) (int, error) {
@@ -119,19 +132,13 @@ func isZombie(w *watchedConn, now time.Time) bool {
 func watchDownstream(conn net.Conn, udp bool) (net.Conn, func(), bool) {
 	reapOnce.Do(startReaper)
 
-	// Circuit breaker admission gate: while tripped, only a couple of connections per
-	// second get in, everything else is closed at the door. The per-second budget is
-	// advisory (two goroutines inside the same second may both slip through) - close
-	// enough, and no lock on the hot path.
-	if now := time.Now(); now.Unix() < breakerUntil.Load() {
-		if sec := now.Unix(); admitSecond.Load() != sec {
-			admitSecond.Store(sec)
-			admitCount.Store(0)
-		}
-		if admitCount.Add(1) > breakerAdmitPerSec {
-			breakerRefused.Add(1)
-			return nil, nil, false
-		}
+	// Circuit breaker admission gate: while tripped and the outbound interface has not
+	// reappeared, EVERY connection is closed at the door — zero pipeline work during an
+	// outage, which is what keeps memory flat. The gate opens the moment the interface
+	// change is stamped (cable back) or the hold expires (hard re-probe).
+	if breakerAdmissionClosed(time.Now()) {
+		breakerRefused.Add(1)
+		return nil, nil, false
 	}
 
 	w := &watchedConn{

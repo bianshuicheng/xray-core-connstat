@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/common/errors"
 )
@@ -14,9 +15,19 @@ type InterfaceUpdater struct {
 	tunIndex  int
 	fixedName string
 	iface     *net.Interface
+	changedAt int64 // unix seconds of the last nil<->interface transition; reset signal for the admission breaker
 }
 
 var updater *InterfaceUpdater
+
+// IfaceChangedAt reports when the outbound interface state last changed (appeared,
+// vanished or switched). The admission breaker reads it to open the gate the moment the
+// uplink returns, instead of waiting out its full hold.
+func (updater *InterfaceUpdater) ChangedAt() int64 {
+	updater.Lock()
+	defer updater.Unlock()
+	return updater.changedAt
+}
 
 func (updater *InterfaceUpdater) Get() *net.Interface {
 	updater.Lock()
@@ -29,15 +40,24 @@ func (updater *InterfaceUpdater) Update() {
 	updater.Lock()
 	defer updater.Unlock()
 
+	changed := func() {
+		updater.changedAt = time.Now().Unix()
+	}
+
 	got, err := findOutboundInterface(updater.tunIndex, updater.fixedName)
 	if err != nil {
 		errors.LogWarning(context.Background(), "[tun] failed to update interface, outbounds will be refused: ", err)
+		if updater.iface != nil {
+			changed()
+		}
 		updater.iface = nil
 		return
 	}
 
 	if got == nil {
-		errors.LogWarning(context.Background(), "[tun] failed to update interface > got == nil")
+		if updater.iface != nil {
+			changed()
+		}
 		updater.iface = nil
 		return
 	}
@@ -46,6 +66,9 @@ func (updater *InterfaceUpdater) Update() {
 	// dialled them, which then treats them as a new client connection and dials again.
 	if got.Index == updater.tunIndex {
 		errors.LogWarning(context.Background(), "[tun] outbound interface would be the TUN itself, refusing: ", got.Name, " ", got.Index)
+		if updater.iface != nil {
+			changed()
+		}
 		updater.iface = nil
 		return
 	}
@@ -60,5 +83,6 @@ func (updater *InterfaceUpdater) Update() {
 	}
 
 	updater.iface = got
+	changed()
 	errors.LogInfo(context.Background(), "[tun] update interface ", got.Name, " ", got.Index)
 }
