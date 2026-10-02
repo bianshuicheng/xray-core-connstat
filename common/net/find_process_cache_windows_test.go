@@ -69,6 +69,47 @@ func TestFindProcessCachedResolvesOwnSocket(t *testing.T) {
 	t.Fatalf("own socket on port %d was never attributed", clientPort)
 }
 
+// TestFindProcessCachedHistoryAttribution proves the retired generations are searched:
+// a socket that existed in the previous table but is gone from the live one must still
+// resolve - this is the path that turns closed-before-lookup connections into names
+// instead of unidentified rows.
+func TestFindProcessCachedHistoryAttribution(t *testing.T) {
+	once.Do(func() { initErr = initWin32API() })
+	if initErr != nil {
+		t.Skipf("win32 api unavailable: %v", initErr)
+	}
+
+	key := processSocketKey{network: processNetTCP, address: netip.MustParseAddr("127.0.0.1"), port: 45678}
+	want := os.Getpid()
+
+	// Seed the live table as if a snapshot once saw the socket, then let a real rebuild
+	// retire that generation into history while the (fake) socket vanishes from live.
+	processLookup.mu.Lock()
+	processLookup.live[key] = processSocketEntry{pid: uint32(want), rank: 3}
+	processLookup.mu.Unlock()
+
+	processLookup.refreshTable()
+
+	processLookup.mu.RLock()
+	_, stillLive := processLookup.live[key]
+	processLookup.mu.RUnlock()
+	if stillLive {
+		t.Skip("the rebuilt table happens to contain the fake port; nothing to prove")
+	}
+
+	pid, name, path, err := FindProcessCached("tcp", "127.0.0.1", 45678, "127.0.0.1", 80)
+	if err != nil {
+		t.Fatalf("history attribution failed: %v", err)
+	}
+	if pid != want {
+		t.Fatalf("history attribution went to pid %d, expected %d", pid, want)
+	}
+	if name == "" || path == "" {
+		t.Fatalf("resolved pid %d but no image: name=%q path=%q", pid, name, path)
+	}
+}
+
+// TestFindProcessCachedIgnoresForeignSource checks that a remote source is refused.
 func TestFindProcessCachedIgnoresForeignSource(t *testing.T) {
 	if _, _, _, err := FindProcessCached("tcp", "203.0.113.7", 41234, "127.0.0.1", 80); err != ErrNotLocal {
 		t.Fatalf("a remote source must not be resolved locally, got %v", err)

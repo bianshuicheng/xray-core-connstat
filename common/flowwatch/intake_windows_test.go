@@ -45,6 +45,13 @@ func TestNewResolvesOwnerAtIntake(t *testing.T) {
 		registry.Unlock()
 	}()
 
+	// Intake resolution may need one throttled table walk on a busy cache; what the
+	// invariant forbids is the old behaviour of staying unidentified for the sampler's
+	// full retry tail. Poll briefly instead of asserting the very first instant.
+	deadline := time.Now().Add(700 * time.Millisecond)
+	for !f.done && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
 	if f.app == "" || !f.done {
 		t.Fatalf("owner must be resolved at intake: app=%q done=%v lookup=%q tries=%d", f.app, f.done, f.lookup, f.tries)
 	}

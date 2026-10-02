@@ -184,7 +184,40 @@ func New(network xnet.Network, source, local xnet.Destination, inboundTag string
 	flows[f.ID] = f
 	registry.Unlock()
 
+	if !f.done {
+		// The first lookup ran against a snapshot that may predate the socket: the live
+		// table walk is throttled, so a brand new connection can briefly miss. Two early
+		// re-checks at 120 ms and 400 ms catch it while the connection is still young,
+		// instead of waiting for the sampler's one-second ticks - the gap that leaves
+		// fast probe connections and one-shot UDP queries unidentified for good.
+		go func() {
+			time.Sleep(120 * time.Millisecond)
+			if resolveFlowOwner(f) {
+				return
+			}
+			time.Sleep(280 * time.Millisecond)
+			resolveFlowOwner(f)
+		}()
+	}
+
 	return f
+}
+
+// resolveFlowOwner re-runs the owner lookup for a flow and records the result. Used by
+// the early retry in New; the sampler keeps its own budgeted loop for the longer tail.
+func resolveFlowOwner(f *Flow) bool {
+	if f.done {
+		return true
+	}
+	if owner, found := lookupOwner(f.Network, f.srcIP, f.srcPort, f.dstIP, f.dstPort); found {
+		registry.Lock()
+		f.app, f.exe, f.pid = owner.name, owner.exe, owner.pid
+		f.own = owner.pid > 0 && owner.pid == os.Getpid()
+		f.done = true
+		registry.Unlock()
+		return true
+	}
+	return false
 }
 
 // WithFlow carries the flow through the stages that annotate it.
