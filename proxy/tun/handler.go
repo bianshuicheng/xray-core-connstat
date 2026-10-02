@@ -138,11 +138,6 @@ func (t *Handler) Start() error {
 			if addrPort.Addr().IsLoopback() || strings.HasPrefix(strings.ToLower(address), "localhost:") {
 				return nil
 			}
-			// 私有目标（多层内网，网段不可枚举但都是 RFC1918/ULA）：交给系统路由表选网卡，
-			// 既不绑出口网卡也不拒绝——内网代理出站依赖的就是内网网卡的路由，外网断了也得通。
-			if addrPort.Addr().IsPrivate() {
-				return nil
-			}
 			// Ask the route table before connecting, not after: a dial whose destination would
 			// leave through the TUN we serve has to fail here, otherwise the handshake is
 			// answered by our own stack and the core ends up serving its own traffic.
@@ -354,7 +349,7 @@ func (t *Handler) HandleConnection(conn net.Conn, destination net.Destination) {
 		}
 	}
 
-	conn, unwatch, admitted := watchDownstream(conn, isUDP, destination)
+	conn, unwatch, admitted := watchDownstream(conn, isUDP)
 	if !admitted {
 		return
 	}

@@ -39,9 +39,8 @@ func newUdpConnectionHandler(handleConnection func(conn net.Conn, dest net.Desti
 // HandlePacket handles UDP packets coming from tun, to forward to the dispatcher
 // this custom handler support FullCone NAT of returning packets, binding connection only by the source addr:port
 func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destination, data []byte) {
-	// 断网熔断：不建会话、不开缓冲通道，直接丢弃——断网期 DNS/查询风暴只剩一次包检查的成本。
-	// 私有目标（多层内网）豁免：内网查询走内网出站，不依赖外网。
-	if breakerAdmissionClosed(time.Now()) && !gateExemptNetAddr(dst.Address.IP()) {
+	// 断网熔断：不建会话、不开缓冲通道，直接丢弃——断网期 DNS/查询风暴只剩一次包检查的成本
+	if breakerAdmissionClosed(time.Now()) {
 		return
 	}
 

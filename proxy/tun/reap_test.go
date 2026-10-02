@@ -5,8 +5,6 @@ import (
 	"net"
 	"testing"
 	"time"
-
-	xnet "github.com/xtls/xray-core/common/net"
 )
 
 type fakeConn struct {
@@ -33,7 +31,7 @@ func (f *fakeConn) Close() error {
 
 func TestWatchDownstreamTracksAndUnregisters(t *testing.T) {
 	inner := &fakeConn{}
-	wrapped, release, admitted := watchDownstream(inner, false, xnet.TCPDestination(xnet.ParseAddress("127.0.0.1"), 80))
+	wrapped, release, admitted := watchDownstream(inner, false)
 	if !admitted {
 		t.Fatal("a free table must admit the connection")
 	}
