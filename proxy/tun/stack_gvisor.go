@@ -70,13 +70,15 @@ func (t *stackGVisor) Start() error {
 		go func(r *tcp.ForwarderRequest) {
 			// 断网熔断：在创建 gVisor 端点之前直接 RST。一次重连尝试的成本只剩 SYN
 			// 处理本身——没有端点、没有协程体、没有缓冲，断网期高频重试不再累积内存。
-			if breakerAdmissionClosed(time.Now()) {
+			// 私有地址（多层内网各层都是 RFC1918/ULA）豁免：内网流量走内网代理出站，
+			// 不依赖外网网卡，断网期必须照常放行。
+			id := r.ID()
+			if breakerAdmissionClosed(time.Now()) && !gateExemptAddr(id.LocalAddress) {
 				r.Complete(true)
 				return
 			}
 
 			var wq waiter.Queue
-			id := r.ID()
 
 			// Perform a TCP three-way handshake.
 			ep, err := r.CreateEndpoint(&wq)

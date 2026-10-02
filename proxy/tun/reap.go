@@ -3,11 +3,14 @@ package tun
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common/errors"
+	xnet "github.com/xtls/xray-core/common/net"
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 // Nothing else in this stack bounds or closes TUN connections: the policy idle timeout is
@@ -65,6 +68,23 @@ func breakerAdmissionClosed(now time.Time) bool {
 		return false
 	}
 	return ifaceChangedAt.Load() <= breakerTrippedAt.Load()
+}
+
+// gateExemptAddr reports whether a destination bypasses the outage admission gate.
+// Private ranges (RFC1918/fc00::/7) and loopback are how multi-layer intranets present:
+// those flows ride the intranet proxy outbound and never depend on the external uplink,
+// so an outage must not kill them at the door.
+func gateExemptAddr(addr tcpip.Address) bool {
+	return gateExemptNetAddr(addr.AsSlice())
+}
+
+func gateExemptNetAddr(b []byte) bool {
+	a, ok := netip.AddrFromSlice(b)
+	if !ok {
+		return false
+	}
+	a = a.Unmap()
+	return a.IsPrivate() || a.IsLoopback()
 }
 
 type watchedConn struct {
@@ -129,16 +149,20 @@ func isZombie(w *watchedConn, now time.Time) bool {
 
 // watchDownstream registers a TUN connection for the sweeper, or refuses it once the
 // ceiling is reached - refusing is what keeps the buffer pool from growing to the storm.
-func watchDownstream(conn net.Conn, udp bool) (net.Conn, func(), bool) {
+func watchDownstream(conn net.Conn, udp bool, dest xnet.Destination) (net.Conn, func(), bool) {
 	reapOnce.Do(startReaper)
 
 	// Circuit breaker admission gate: while tripped and the outbound interface has not
 	// reappeared, EVERY connection is closed at the door — zero pipeline work during an
-	// outage, which is what keeps memory flat. The gate opens the moment the interface
-	// change is stamped (cable back) or the hold expires (hard re-probe).
-	if breakerAdmissionClosed(time.Now()) {
-		breakerRefused.Add(1)
-		return nil, nil, false
+	// outage, which is what keeps memory flat. Private-destination flows (the multi-layer
+	// intranet) are exempt: they ride the intranet proxy and do not need the external
+	// uplink. The gate opens the moment the interface change is stamped (cable back) or
+	// the hold expires (hard re-probe).
+	if now := time.Now(); breakerAdmissionClosed(now) {
+		if !(dest.Address.Family().IsIP() && gateExemptNetAddr(dest.Address.IP())) {
+			breakerRefused.Add(1)
+			return nil, nil, false
+		}
 	}
 
 	w := &watchedConn{
