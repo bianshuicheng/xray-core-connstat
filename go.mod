@@ -18,6 +18,7 @@ require (
 	github.com/pires/go-proxyproto v0.15.0
 	github.com/refraction-networking/utls v1.8.3-0.20260301010127-aa6edf4b11af
 	github.com/robfig/cron/v3 v3.0.1
+	github.com/sagernet/sing v0.5.1
 	github.com/stretchr/testify v1.12.1
 	github.com/vishvananda/netlink v1.3.1
 	github.com/xtls/reality v0.0.0-20260908062103-8cdf7bf9c7f0
@@ -26,7 +27,7 @@ require (
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842
 	golang.org/x/net v0.59.0
 	golang.org/x/sync v0.23.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.49.0
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 	golang.zx2c4.com/wireguard/windows v1.1.1
@@ -52,7 +53,6 @@ require (
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/transport/v4 v4.1.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/sagernet/sing v0.5.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
